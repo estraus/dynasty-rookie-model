@@ -43,8 +43,12 @@ def combine_medians(feats: pd.DataFrame) -> dict:
     player with no combine gets the same fill the model was trained on.
     """
     tested = feats[feats.combine_missing == 0] if "combine_missing" in feats else feats
-    return {pos: {c: float(g[c].median()) for c in COMBINE_COLS}
+    meds = {pos: {c: float(g[c].median()) for c in COMBINE_COLS}
             for pos, g in tested.groupby("position")}
+    if "age" in feats:  # fallback fill for score-class players with no birthdate
+        for pos, g in feats.groupby("position"):
+            meds.setdefault(pos, {})["age"] = float(g.age.median())
+    return meds
 
 
 def impute_combine(out: pd.DataFrame, medians: dict | None = None) -> pd.DataFrame:
@@ -72,6 +76,36 @@ def impute_combine(out: pd.DataFrame, medians: dict | None = None) -> pd.DataFra
     return out
 
 
+def age_on_sept1(birthdate: pd.Series, draft_season: pd.Series) -> pd.Series:
+    """Whole years old on Sept 1 of the draft year (rookie-season start).
+
+    Matches nflverse's own draft `age` for ~95% of players that have both.
+    """
+    bd = pd.to_datetime(birthdate, errors="coerce")
+    ref = pd.to_datetime(draft_season.astype("Int64").astype(str) + "-09-01", errors="coerce")
+    had_bday = (ref.dt.month > bd.dt.month) | (
+        (ref.dt.month == bd.dt.month) & (ref.dt.day >= bd.dt.day))
+    return (ref.dt.year - bd.dt.year - (~had_bday).astype(int)).astype(float).where(bd.notna())
+
+
+def backfill_age(members: pd.DataFrame, ids: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Fill missing draft `age` from the nflverse id table's birthdate.
+
+    nflverse leaves age blank for some late-round picks (12 of 80 skill players
+    in 2026). Downstream fillna(0) then read them as 0-year-olds, ~15-25 SDs
+    young, which dominated their drivers. Birthdate is known at draft time, so
+    this is point-in-time safe.
+    """
+    if not members.age.isna().any():
+        return members
+    if ids is None:
+        ids = pd.read_parquet(ROOT / "data/raw/nfl_ids.parquet")
+    bd = ids[["gsis_id", "birthdate"]].dropna().drop_duplicates("gsis_id")
+    out = members.merge(bd, on="gsis_id", how="left")
+    out["age"] = out.age.fillna(age_on_sept1(out.birthdate, out.draft_season))
+    return out.drop(columns="birthdate")
+
+
 def assemble(members: pd.DataFrame, col: pd.DataFrame | None = None,
              medians: dict | None = None) -> pd.DataFrame:
     """Build the feature matrix for a set of drafted players.
@@ -80,6 +114,12 @@ def assemble(members: pd.DataFrame, col: pd.DataFrame | None = None,
     cfbd_player_id, age. Optional hit/label_complete are passed through. Works for
     both the training classes and the 2026 scoring class -- same features, no leak.
     """
+    members = backfill_age(members)
+    if medians is not None and members.age.isna().any():
+        # last resort when scoring: the training position median, never 0
+        members = members.copy()
+        members["age"] = members.age.fillna(
+            members.position.map(lambda p: medians.get(p, {}).get("age", np.nan)))
     cfg = config()
     col = college.build() if col is None else col
     combine = _combine()

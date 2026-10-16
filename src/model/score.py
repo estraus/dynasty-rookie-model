@@ -233,6 +233,9 @@ COMBINE_COVERAGE_FLOOR = 0.25  # recent classes test ~50-70%; far below = broken
 def _check_combine_coverage(feats: pd.DataFrame) -> None:
     """Fail loudly if the score class has (almost) no combine data, which means
     the combine pull missed this class rather than that players skipped it."""
+    if feats.age.isna().any():
+        raise RuntimeError(f"missing age for {feats.loc[feats.age.isna(), 'player'].tolist()}; "
+                           "a NaN age is read as 0 years old downstream")
     tested = 1 - feats.combine_missing.mean()
     yr = config()["seasons"]["score_class"]
     print(f"combine coverage for {yr}: {tested:.0%} tested")

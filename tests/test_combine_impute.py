@@ -59,3 +59,22 @@ def test_tested_players_keep_their_own_numbers():
 def test_unfillable_gap_raises_instead_of_zero():
     with pytest.raises(ValueError, match="TE"):
         impute_combine(_frame([("TE", np.nan, np.nan, np.nan)]), combine_medians(TRAIN))
+
+
+# --- missing draft age: same NaN -> 0 failure mode, fixed by birthdate backfill
+
+from src.features.build import age_on_sept1, backfill_age  # noqa: E402
+
+
+def test_age_on_sept1_birthday_boundary():
+    bd = pd.Series(["2004-01-28", "2002-09-01", "2002-09-02"])
+    yr = pd.Series([2026, 2026, 2026])
+    assert age_on_sept1(bd, yr).tolist() == [22.0, 24.0, 23.0]
+
+
+def test_backfill_age_only_fills_gaps():
+    members = pd.DataFrame({"gsis_id": ["a", "b"], "draft_season": [2026, 2026],
+                            "age": [21.0, np.nan]})
+    ids = pd.DataFrame({"gsis_id": ["a", "b"], "birthdate": ["1990-01-01", "2003-10-23"]})
+    out = backfill_age(members, ids)
+    assert out.age.tolist() == [21.0, 22.0]  # existing age kept, gap filled
