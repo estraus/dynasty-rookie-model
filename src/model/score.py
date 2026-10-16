@@ -4,9 +4,9 @@ Pipeline (frozen model, no re-tuning):
   1. pull the score-class draft picks (cached)
   2. crosswalk them to CFBD college ids
   3. assemble the same features used in training
-  4. capital P(hit) -> position-value adjusted (data-derived premiums; superflex
-     enters via QB replacement depth) -> historical percentile = score 1-100
-  5. full-LR P(hit) gives the 'lean vs capital' and top-3 drivers
+  4. expected 3-season VOR (src.model.value) x position horizon multiplier ->
+     historical percentile = score 1-100 (superflex enters via QB replacement)
+  5. the full residual model gives the 'lean vs capital' and top-3 drivers
   6. tiers from score bands; KTC delta if overrides/ktc_<class>.csv exists
 
 Run:  python -m src.model.score
@@ -57,60 +57,44 @@ def _score_members() -> pd.DataFrame:
     return m.rename(columns={"pfr_player_name": "player", "season": "draft_season"})
 
 
-def _hit_vor() -> dict:
-    """{pos: mean league-scoring VOR (ppg) of HIT seasons} over the lineup
-    replacement level (config board.replacement_rank -- superflex enters via
-    QB's ~24 starters). This is the value-of-a-hit in this league's points."""
-    cfg = config()
-    ppg = pd.read_parquet(ROOT / "data/interim/season_ppg.parquet")
-    q = ppg[ppg.games >= cfg["labels"]["min_games"]]
-    vor = {}
-    for pos, n in cfg["board"]["replacement_rank"].items():
-        d = q[q.position == pos]
-        repl = d.groupby("season").ppg.apply(lambda s, k=n: s.nlargest(k).iloc[-1])
-        hits = d[d.is_topN]
-        vor[pos] = float((hits.ppg - hits.season.map(repl)).mean())
-    return vor
+def _value_scores(feats: pd.DataFrame, vfrozen: dict, bfrozen: dict) -> pd.DataFrame:
+    """Expected value -> 6-season dynasty value -> historical percentile (1-100).
 
-
-def _premiums(hit_vor: dict) -> dict:
-    """Positional value weights for the cross-position score: hit VOR
-    normalized so the non-QB mean is 1.0. Replaces the old hand-set
-    superflex_qb_premium: expected value = P(hit) x value-of-hit, and the
-    data measures the value-of-hit."""
-    base = np.mean([v for p, v in hit_vor.items() if p != "QB"])
-    return {p: round(float(v / base), 3) for p, v in hit_vor.items()}
-
-
-def _percentile_scores(feats: pd.DataFrame, frozen: dict, prems: dict) -> pd.DataFrame:
-    """Capital P(hit) -> position-value-adjusted -> historical percentile (1-100).
-
-    The historical pool is every training player's frozen train_phit, adjusted
-    by the same positional premiums, so a 2026 score means what it meant
-    historically.
+    value (exp_vor)  expected ppg over replacement, mean of best 2 of first 3
+                     seasons, from the shipped value model (capital everywhere
+                     unless a challenger cleared the bootstrap bar)
+    dyn_value        value x position horizon multiplier (years 4-6 / 1-3), so
+                     front-loaded RBs and back-loaded WR/TEs compare fairly
+    score_1_100      percentile of dyn_value among every training player's
+                     fitted dyn_value -- an 80 means what it meant historically
+    lean             the full production/age residual model's adjustment, in
+                     ppg VOR; lean_validated says whether it beat capital
+    value_range      80% range of realized value for players predicted alike
+    p_hit            binary capital model (kept for continuity)
     """
-    def adj(p, pos):
-        return p * prems[pos]
+    from src.model.value import interval_for
 
-    hist = np.concatenate([adj(frozen[pos]["train_phit"], pos) for pos in frozen])
-    hist_sorted = np.sort(hist)
-
+    hist = np.sort(np.concatenate([vfrozen[p]["hist_value"] for p in vfrozen]))
     out = feats.copy()
-    cap, full, lean = [], [], []
-    for r in feats.itertuples():
-        fp = frozen[r.position]
-        row = feats.loc[[r.Index]]
-        cap_p = fp["model"].predict_proba(
-            row[fp["cols"]].astype(float).fillna(0).values)[:, 1][0]
-        full_p = fp["full_lr"].predict_proba(
-            row[fp["full_cols"]].astype(float).fillna(0).values)[:, 1][0]
-        cap.append(cap_p); full.append(full_p); lean.append(full_p - cap_p)
-    out["p_hit"] = cap
-    out["p_hit_full"] = full
-    out["lean"] = lean
-    adj_val = np.array([adj(p, pos) for p, pos in zip(cap, out.position)])
-    pct = np.searchsorted(hist_sorted, adj_val, side="right") / len(hist_sorted)
+    cols = {k: [] for k in ("exp_vor", "dyn_value", "lean", "range_lo", "range_hi", "p_hit")}
+    for i in out.index:
+        row = out.loc[[i]]
+        pos = row.position.iloc[0]
+        vf, bf = vfrozen[pos], bfrozen[pos]
+        val = float(vf["models"][vf["chosen"]].predict(row)[0])
+        lo, hi = interval_for(vf["intervals"], val)
+        cols["exp_vor"].append(round(val, 2))
+        cols["dyn_value"].append(round(val * vf["horizon"], 2))
+        cols["lean"].append(round(float(vf["models"][vf["lean_from"]].adjustment(row)[0]), 3))
+        cols["range_lo"].append(round(lo, 2)); cols["range_hi"].append(round(hi, 2))
+        cols["p_hit"].append(float(bf["model"].predict_proba(
+            row[bf["cols"]].astype(float).fillna(0).values)[:, 1][0]))
+    for k, v in cols.items():
+        out[k] = v
+    pct = np.searchsorted(hist, out.dyn_value.values, side="right") / len(hist)
     out["score_1_100"] = np.clip(np.round(pct * 100).astype(int), 1, 100)
+    out["lean_validated"] = out.position.map(lambda p: bool(vfrozen[p]["lean_validated"]))
+    out["reliability"] = out.position.map(lambda p: vfrozen[p]["reliability"])
     return out
 
 
@@ -121,27 +105,33 @@ def _tier(score: int) -> int:
     return config()["board"]["tiers"][-1]["tier"]
 
 
-def _drivers(feats: pd.DataFrame, frozen: dict) -> list:
-    """Top-3 full-LR drivers per player: standardized coef * standardized value."""
+def _drivers(feats: pd.DataFrame, vfrozen: dict) -> list:
+    """Top-3 drivers per player, in ppg-VOR units.
+
+    'draft capital' = the isotonic capital value minus the position's average
+    capital value (how much the slot itself is worth); the rest are the full
+    residual model's per-feature contributions (standardized coef x z).
+    """
     all_drivers = []
-    for r in feats.itertuples():
-        fp = frozen[r.position]
-        pipe = fp["full_lr"]
-        scaler, lr = pipe.named_steps["standardscaler"], pipe.named_steps["logisticregression"]
-        cols = fp["full_cols"]
-        x = feats.loc[[r.Index], cols].astype(float).fillna(0.0).values[0]
-        xz = (x - scaler.mean_) / scaler.scale_
-        contrib = lr.coef_[0] * xz          # signed log-odds contribution
-        order = np.argsort(-np.abs(contrib))[:3]
+    for i in feats.index:
+        row = feats.loc[[i]]
+        pos = row.position.iloc[0]
+        vf = vfrozen[pos]
+        full = vf["models"]["full"]
+        cap = float(full.capital(row)[0]) - vf["cap_mean"]
+        contrib = full.contributions(row)[0]
+        sc = full.ridge.named_steps["standardscaler"]
+        x = row[full.cols].astype(float).fillna(0.0).values[0]
+        z = (x - sc.mean_) / sc.scale_
+        items = [("draft capital", cap, float(row.pick.iloc[0]), None)]
+        items += [(DRIVER_LABELS.get(c, c), float(contrib[j]),
+                   None if pd.isna(row[c].iloc[0]) else round(float(x[j]), 2),
+                   round(float(z[j]), 2)) for j, c in enumerate(full.cols)]
+        items.sort(key=lambda t: -abs(t[1]))
         all_drivers.append([
-            {"name": DRIVER_LABELS.get(cols[i], cols[i]),
-             "direction": "positive" if contrib[i] >= 0 else "negative",
-             "magnitude": round(float(abs(contrib[i])), 3),
-             # specificity for the drawer: the player's raw value and how far
-             # from the position's training norm it sits (z, scaler units)
-             "value": None if pd.isna(feats.loc[r.Index, cols[i]]) else round(float(x[i]), 2),
-             "z": round(float(xz[i]), 2)}
-            for i in order])
+            {"name": n, "direction": "positive" if v >= 0 else "negative",
+             "magnitude": round(abs(v), 3), "value": val, "z": zz}
+            for n, v, val, zz in items[:3]])
     return all_drivers
 
 
@@ -246,7 +236,8 @@ def _check_combine_coverage(feats: pd.DataFrame) -> None:
 
 
 def build_board() -> pd.DataFrame:
-    frozen = joblib.load(PROC / "models.joblib")
+    frozen = joblib.load(PROC / "models.joblib")          # binary: p_hit + comps
+    vfrozen = joblib.load(PROC / "value_models.joblib")   # value: score, lean, drivers
     col = college.build()
     members = _score_members()
     # fill combine gaps with TRAINING medians (what the model learned on)
@@ -257,17 +248,11 @@ def build_board() -> pd.DataFrame:
         members[["gsis_id", "cfbd_player_id", "match_method", "college"]],
         on="gsis_id", how="left")
 
-    hit_vor = _hit_vor()
-    prems = _premiums(hit_vor)
-    print(f"positional premiums (data-derived): {prems}")
-    feats = _percentile_scores(feats, frozen, prems)
-    # expected VOR: P(hit) x value-of-a-hit at the position, in this league's
-    # ppg over replacement -- the draft-day "points" comparison across positions
-    feats["exp_vor"] = [round(p * hit_vor[pos], 2)
-                        for p, pos in zip(feats.p_hit, feats.position)]
+    print("horizon multipliers:", {p: vfrozen[p]["horizon"] for p in vfrozen})
+    feats = _value_scores(feats, vfrozen, frozen)
     feats["tier"] = feats.score_1_100.map(_tier)
     # attach per-player drivers + college line as columns (index-aligned pre-sort)
-    feats["drivers"] = _drivers(feats, frozen)
+    feats["drivers"] = _drivers(feats, vfrozen)
     feats["comps"] = _comps(feats, frozen)
     lines = _college_line(feats, col)
     feats["college_stats"] = [lines.get(i, {}) for i in feats.index]
@@ -275,13 +260,18 @@ def build_board() -> pd.DataFrame:
     feats = feats.merge(_draft_class()[["gsis_id", "round"]].drop_duplicates("gsis_id"),
                         on="gsis_id", how="left")
 
-    feats = feats.sort_values("score_1_100", ascending=False, kind="stable").reset_index(drop=True)
+    # score ties (isotonic plateaus) break on dynasty value, then draft slot
+    feats = feats.sort_values(["score_1_100", "dyn_value", "pick"],
+                              ascending=[False, False, True], kind="stable").reset_index(drop=True)
     return pd.DataFrame({
         "player_id": feats.gsis_id, "name": feats.player, "pos": feats.position,
         "school": feats.college, "pick": feats.pick.astype(int), "round": feats["round"],
         "age": feats.age, "score_1_100": feats.score_1_100, "p_hit": feats.p_hit.round(4),
-        "exp_vor": feats.exp_vor,
-        "lean": feats.lean.round(4), "tier": feats.tier, "ktc_rank": feats.ktc_rank,
+        "exp_vor": feats.exp_vor, "dyn_value": feats.dyn_value,
+        "value_range": [[lo, hi] for lo, hi in zip(feats.range_lo, feats.range_hi)],
+        "reliability": feats.reliability,
+        "lean": feats.lean, "lean_validated": feats.lean_validated,
+        "tier": feats.tier, "ktc_rank": feats.ktc_rank,
         "delta_vs_ktc": feats.delta_vs_ktc, "market_ranks": feats.market_ranks,
         "drivers": feats.drivers, "comps": feats.comps,
         "college_stats": feats.college_stats,
@@ -295,7 +285,7 @@ def main() -> None:
     records = json.loads(board.to_json(orient="records"))
     payload = json.dumps(records, indent=2)
     (PROC / "board.json").write_text(payload)
-    flat = board.drop(columns=["drivers", "college_stats", "comps", "market_ranks"])
+    flat = board.drop(columns=["drivers", "college_stats", "comps", "market_ranks", "value_range"])
     flat.to_csv(PROC / "board.csv", index=False)
     # app reads from app/public at build time
     app_data = ROOT / "app" / "public"
@@ -304,7 +294,7 @@ def main() -> None:
 
     yr = config()["seasons"]["score_class"]
     print(f"scored {len(board)} players in the {yr} class")
-    print(board.head(15)[["name", "pos", "pick", "score_1_100", "p_hit", "lean", "tier"]]
+    print(board.head(20)[["name", "pos", "pick", "score_1_100", "exp_vor", "dyn_value", "lean", "tier"]]
           .to_string(index=False))
     has_college = board.college_stats.map(bool).mean()
     print(f"\ncollege stat line present: {has_college:.0%} | tiers: "

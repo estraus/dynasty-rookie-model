@@ -6,11 +6,13 @@ import Delta from "./components/Delta.jsx";
 import BestAvailable from "./components/BestAvailable.jsx";
 import League from "./components/League.jsx";
 import About from "./components/About.jsx";
+import InSeason from "./components/InSeason.jsx";
 
 const VIEWS = [
   ["board", "Board"],
   ["delta", "KTC Delta"],
   ["draft", "Draft Day"],
+  ["inseason", "In-Season"],
   ["league", "League"],
   ["about", "About"],
 ];
@@ -142,6 +144,7 @@ export default function App() {
         )}
         {view === "delta" && <Delta rows={rows} taken={taken} onSelect={setSelected} />}
         {view === "league" && <League />}
+        {view === "inseason" && <InSeason />}
         {view === "about" && <About />}
         {view === "draft" && (
           <div className="grid md:grid-cols-2 gap-8">

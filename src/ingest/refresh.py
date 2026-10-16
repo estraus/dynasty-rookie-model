@@ -25,14 +25,17 @@ from src.util import ROOT
 def recent_weekly(n_seasons: int = 2) -> pd.DataFrame:
     """Last n published seasons of weekly stats, pulled directly (small enough
     for CI; the full 2013+ cache is only needed for training)."""
-    import nfl_data_py as nfl
+    from src.ingest.nflverse import weekly_season
     frames = []
     year = date.today().year
     for y in range(year, year - 6, -1):
         try:
-            frames.append(nfl.import_weekly_data([y]))
+            df = weekly_season(y)
         except Exception:  # noqa: BLE001 - unpublished season, keep looking
             continue
+        # a season only counts once it has a meaningful sample (skip week 1-3 noise)
+        if df.week.nunique() >= 4:
+            frames.append(df)
         if len(frames) == n_seasons:
             break
     return pd.concat(frames, ignore_index=True)
@@ -61,6 +64,14 @@ def main() -> None:
     board = patch_board_ktc(json.loads(board_path.read_text()), ktc_ranks)
     board_path.write_text(json.dumps(board))
     print(f"board.json: KTC delta refreshed for {sum(1 for r in board if r['ktc_rank'])} players")
+
+    # in-season re-valuation of the classes still inside their 3-season window.
+    # Isolated so an nflverse hiccup can't cost the day's KTC/league refresh.
+    try:
+        from src.model import inseason
+        inseason.apply()
+    except Exception as e:  # noqa: BLE001
+        print(f"::warning::in-season update skipped: {e}")
 
 
 if __name__ == "__main__":

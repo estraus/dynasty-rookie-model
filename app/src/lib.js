@@ -14,6 +14,22 @@ export function scoreColor(s) {
   return "text-mute";
 }
 
+// lean is in league ppg over replacement; below this it's noise
+export const LEAN_MIN = 0.25;
+
+// backtest rank correlation (Spearman, out of class) -> plain-language confidence
+export function confidence(rho) {
+  if (rho == null) return { label: "unknown", cls: "text-mute" };
+  if (rho >= 0.5) return { label: "moderate", cls: "text-dim" };
+  if (rho >= 0.4) return { label: "low-moderate", cls: "text-dim" };
+  return { label: "low", cls: "text-down" };
+}
+
+export function fmtRange(r) {
+  if (!r) return "—";
+  return `${r[0].toFixed(1)}–${r[1].toFixed(1)}`;
+}
+
 export function signed(n) {
   const v = Math.round(n);
   return v > 0 ? `+${v}` : `${v}`;

@@ -1,5 +1,5 @@
 import React from "react";
-import { scoreColor } from "../lib.js";
+import { LEAN_MIN, confidence, fmtRange, scoreColor } from "../lib.js";
 import { PosTag, Tape } from "./ui.jsx";
 
 const STAT_LABELS = {
@@ -33,9 +33,14 @@ export default function Drawer({ player, onClose }) {
 
         <div className="flex gap-6 mt-6">
           <Stat label="Score" value={player.score_1_100} cls={scoreColor(player.score_1_100)} />
+          <Stat label="xVOR" value={player.exp_vor?.toFixed(1) ?? "—"} />
           <Stat label="P(hit)" value={`${Math.round(player.p_hit * 100)}%`} />
           <Stat label="Tier" value={player.tier} />
         </div>
+
+        <Section title="How sure">
+          <Uncertainty player={player} />
+        </Section>
 
         <Section title="Top drivers">
           <ul className="space-y-1.5">
@@ -48,7 +53,10 @@ export default function Drawer({ player, onClose }) {
                     </span>{" "}
                     {d.name}
                   </span>
-                  <span className="font-mono text-xs text-mute tabular-nums">{d.magnitude.toFixed(2)}</span>
+                  <span className="font-mono text-xs text-mute tabular-nums">
+                    {d.direction === "positive" ? "+" : "−"}
+                    {d.magnitude.toFixed(2)} pts/wk
+                  </span>
                 </div>
                 <div className="pl-4 font-mono text-[11px] text-mute">{driverDetail(d, player.pos)}</div>
               </li>
@@ -58,6 +66,12 @@ export default function Drawer({ player, onClose }) {
 
         <Section title="Model lean vs draft capital">
           <p className="text-sm text-dim">{leanText(player.lean)}</p>
+          {!player.lean_validated && (
+            <p className="font-mono text-[11px] text-mute mt-2">
+              unvalidated: in backtest, adding production/age stats did not beat draft slot alone
+              at {player.pos}. Treat the lean as a tiebreaker, not a signal.
+            </p>
+          )}
         </Section>
 
         {stats.length > 0 && (
@@ -127,11 +141,11 @@ function ModelVsMarket({ player }) {
 const FLAG_DRIVERS = new Set(["no combine", "early declare", "power conference"]);
 
 function driverDetail(d, pos) {
-  if (d.value == null) return "stat missing — imputed; the flag itself is doing the work";
   if (d.name === "draft capital")
-    return d.z <= 0
-      ? `picked earlier than the typical drafted ${pos}`
-      : `picked later than the typical drafted ${pos}`;
+    return d.direction === "positive"
+      ? `pick ${d.value} is worth more than the typical drafted ${pos}'s slot`
+      : `pick ${d.value} is worth less than the typical drafted ${pos}'s slot`;
+  if (d.value == null) return "stat missing — imputed; the flag itself is doing the work";
   if (FLAG_DRIVERS.has(d.name)) return d.value >= 0.5 ? "yes" : "no";
   const mag = Math.abs(d.z);
   const side = d.z >= 0 ? "above" : "below";
@@ -176,19 +190,42 @@ function Comps({ player }) {
 // the model's rank move vs capital has two possible engines: the production/age
 // lean (the drivers), or positional hit rates at that slot. lean tells which.
 function modelNote(lean, dev) {
-  if (lean != null && lean >= 0.03) return "production/age drivers boost him";
-  if (lean != null && lean <= -0.03)
-    return dev > 0 ? "slot hit-rate carries him despite cooler drivers" : "production/age drivers cool on him";
+  if (lean != null && lean >= LEAN_MIN) return "production/age drivers boost him";
+  if (lean != null && lean <= -LEAN_MIN)
+    return dev > 0 ? "slot value carries him despite cooler drivers" : "production/age drivers cool on him";
+  if (dev !== 0) return "position value at his slot (league scoring, career length)";
   return "tracks draft capital";
+}
+
+// the score is a point estimate; this says how wide the outcomes run and how
+// much the position's backtest earns trust
+function Uncertainty({ player }) {
+  const c = confidence(player.reliability);
+  return (
+    <div className="space-y-1.5 text-sm text-dim">
+      <p>
+        Past players with a similar expected value returned{" "}
+        <span className="font-mono text-ink tabular-nums">{fmtRange(player.value_range)}</span> pts/wk
+        over replacement (80% range). Expected:{" "}
+        <span className="font-mono text-ink tabular-nums">{player.exp_vor?.toFixed(1)}</span>.
+      </p>
+      <p>
+        Confidence at {player.pos}: <span className={`font-semibold ${c.cls}`}>{c.label}</span>
+        <span className="font-mono text-[11px] text-mute">
+          {" "}· backtest rank correlation {player.reliability?.toFixed(2) ?? "—"}
+        </span>
+      </p>
+    </div>
+  );
 }
 
 function verdict(delta, lean, mktVsCap) {
   const d = Math.round(delta);
   if (Math.abs(d) <= 2) return "Model and market roughly agree — no edge either way.";
   const modelSide =
-    lean != null && lean >= 0.03
+    lean != null && lean >= LEAN_MIN
       ? "the model's production/age drivers like him more than his slot"
-      : lean != null && lean <= -0.03
+      : lean != null && lean <= -LEAN_MIN
         ? "the model is capital-driven here (drivers are cooler)"
         : "the model tracks his draft capital";
   const marketSide =
@@ -222,8 +259,8 @@ function Section({ title, children }) {
 
 function leanText(lean) {
   if (lean == null) return "No production model available.";
-  if (Math.abs(lean) < 0.03) return "Production model agrees with draft capital.";
+  if (Math.abs(lean) < LEAN_MIN) return "Production model agrees with draft capital.";
   return lean > 0
-    ? `Production/age model likes him more than his draft slot (+${lean.toFixed(2)}). Possible value.`
-    : `Production/age model is cooler than his draft slot (${lean.toFixed(2)}). Capital-driven.`;
+    ? `Production/age model adds +${lean.toFixed(2)} pts/wk to his draft-slot value.`
+    : `Production/age model takes ${lean.toFixed(2)} pts/wk off his draft-slot value.`;
 }

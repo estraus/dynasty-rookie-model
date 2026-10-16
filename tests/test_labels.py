@@ -69,9 +69,19 @@ def test_known_hits_and_busts():
 
 
 def test_incomplete_windows_flagged():
+    """label_complete tracks the last completed season in the weekly cache."""
+    import pandas as pd  # noqa: PLC0415
     L = _labels()
-    # 2023 class cannot have a complete 3yr window (weekly data ends 2024)
-    assert not L[L.draft_season == 2023].label_complete.any()
-    assert L[L.draft_season <= 2022].label_complete.all()
+    last = int(pd.read_parquet(ROOT / "data/interim/season_ppg.parquet").season.max())
+    w = config()["labels"]["window_seasons"]
+    assert L[L.draft_season <= last - w + 1].label_complete.all()
+    assert not L[L.draft_season > last - w + 1].label_complete.any()
+
+
+def test_value_label_known_players():
+    L = _labels().set_index("player")
+    assert L.loc["Justin Jefferson", "value"] > 5       # elite from year 1
+    assert L.loc["Zach Wilson", "value"] == 0           # never above replacement
+    assert (L.value >= 0).all()
 
 

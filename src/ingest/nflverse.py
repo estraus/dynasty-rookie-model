@@ -52,9 +52,65 @@ def combine():
     return df
 
 
+# nflverse moved weekly player stats to a new release ("stats_player") starting
+# with 2025; nfl_data_py's import_weekly_data can't read it and silently skips
+# those seasons. Same stats, four renamed columns.
+STATS_PLAYER_FROM = 2025
+STATS_PLAYER_URL = ("https://github.com/nflverse/nflverse-data/releases/download/"
+                    "stats_player/stats_player_week_{year}.parquet")
+STATS_PLAYER_RENAME = {"team": "recent_team", "passing_interceptions": "interceptions",
+                       "sacks_suffered": "sacks", "sack_yards_lost": "sack_yards"}
+
+
+def weekly_season(year: int):
+    """One season of weekly player stats in the legacy column layout."""
+    if year < STATS_PLAYER_FROM:
+        return nfl.import_weekly_data([year])
+    import io
+
+    import pandas as pd
+    import requests
+    r = requests.get(STATS_PLAYER_URL.format(year=year), timeout=120)
+    r.raise_for_status()
+    df = pd.read_parquet(io.BytesIO(r.content)).rename(columns=STATS_PLAYER_RENAME)
+    return df
+
+
+def weekly_seasons(years):
+    """Concat weekly stats across seasons, skipping unpublished ones (404)."""
+    import pandas as pd
+
+    frames = []
+    for y in years:
+        try:
+            frames.append(weekly_season(y))
+        except Exception as e:  # noqa: BLE001 - network/404, keep going
+            print(f"  skip {y}: {str(e)[:60]}")
+    return pd.concat(frames, ignore_index=True)
+
+
 def weekly():
-    # Weekly player stats -> used to compute per-season PPG in the labels step.
-    return cached("nfl_weekly", lambda: _by_year(nfl.import_weekly_data))
+    """Completed-season weekly stats (labels). Refreshes a cache that stops
+    short of nfl_end (built before the stats_player move)."""
+    import pandas as pd
+
+    end = config()["seasons"]["nfl_end"]
+    df = cached("nfl_weekly", lambda: weekly_seasons(_years()))
+    missing = [y for y in _years() if y > int(df.season.max())]
+    if missing:  # append only the new seasons; cached ones stay byte-identical
+        new = weekly_seasons(missing)
+        df = cached("nfl_weekly", lambda: pd.concat(
+            [df, new[[c for c in df.columns if c in new.columns]]], ignore_index=True),
+            refresh=True)
+    if df.season.max() < end:
+        print(f"  warning: weekly stats end at {df.season.max()}, config nfl_end={end}")
+    return df
+
+
+def current_weekly():
+    """The in-progress season (score_class), never cached: it changes weekly.
+    Used only by the in-season update, never by labels."""
+    return weekly_season(config()["seasons"]["score_class"])
 
 
 def ids():

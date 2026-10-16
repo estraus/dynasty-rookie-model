@@ -6,6 +6,9 @@ half-PPR, 6pt passing TD -- all coefficients live in config.yaml.
 hit = a top-N positional PPG season (min games) within a player's first 3 NFL
 seasons: top-12 QB, top-24 RB, top-24 WR, top-12 TE.
 
+value (the primary target) = mean of the player's best 2 season VORs in those
+3 seasons, where VOR = ppg over the lineup replacement level, floored at 0.
+
 The ranking pool is league-wide (every player at that position that season), not
 just rookies. Regular season only -- dynasty relevance is scored on REG.
 
@@ -47,7 +50,8 @@ def score_weekly(w: pd.DataFrame, scoring: dict | None = None) -> pd.Series:
 
 
 def season_ppg() -> pd.DataFrame:
-    w = pd.read_parquet(ROOT / "data/raw/nfl_weekly.parquet")
+    from src.ingest.nflverse import weekly
+    w = weekly()
     w = w[(w.season_type == "REG") & w.position.notna()].copy()
     w["pts"] = score_weekly(w)
     # a player's position for a season = their most frequent listed position
@@ -71,7 +75,29 @@ def season_ppg() -> pd.DataFrame:
         r = agg.loc[mask].groupby("season")["ppg"].rank(ascending=False, method="min")
         agg.loc[mask, "pos_rank"] = r
         agg.loc[mask, "is_topN"] = r <= topn
+    # VOR: ppg over the lineup replacement level (the Nth-best qualified player
+    # at the position that season; superflex enters via QB's ~24 starters).
+    # Floored at 0 -- below replacement is equally worthless in dynasty.
+    agg["vor"] = 0.0
+    for pos_name, n in cfg["board"]["replacement_rank"].items():
+        mask = (agg.position == pos_name) & (agg.games >= min_g)
+        repl = agg[mask].groupby("season").ppg.apply(lambda s, k=n: s.nlargest(k).iloc[-1])
+        agg.loc[mask, "vor"] = (agg.loc[mask, "ppg"] - agg.loc[mask, "season"].map(repl)).clip(lower=0)
     return agg
+
+
+VALUE_BEST_N = 2  # value = mean VOR of a player's best N seasons in the window
+
+
+def player_value(season_vors: list[float], window: int, best_n: int = VALUE_BEST_N) -> float:
+    """Continuous label: mean of the best `best_n` season VORs inside the window.
+
+    Seasons the player didn't qualify (or didn't play) count as 0, so one hot
+    8-game stretch is worth half of the same stretch repeated -- the fix for the
+    binary label letting one RB fill-in season count as a full 'hit'.
+    """
+    vals = sorted(season_vors + [0.0] * max(0, window - len(season_vors)), reverse=True)
+    return float(sum(vals[:best_n]) / best_n)
 
 
 def build_labels(ppg: pd.DataFrame) -> pd.DataFrame:
@@ -104,6 +130,7 @@ def build_labels(ppg: pd.DataFrame) -> pd.DataFrame:
             "hit": len(hit_seasons) > 0,
             "hit_season": min(hit_seasons) if hit_seasons else pd.NA,
             "best_pos_rank": best_rank,
+            "value": player_value([float(row.vor) for _, row in seasons], window),
         })
     return pd.DataFrame(rows)
 

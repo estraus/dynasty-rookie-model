@@ -3,8 +3,8 @@ import { POSITIONS, scoreColor } from "../lib.js";
 import { PosTag, Tape } from "./ui.jsx";
 
 // draft-day panel: best available overall + per position among untaken players.
-// xVOR = P(hit) x mean value of a hit at the position, in league ppg over
-// replacement -- the VBD number for cross-position picks.
+// xVOR = expected league ppg over replacement (best 2 of first 3 seasons).
+// Cross-position order comes from the score, which also weighs career length.
 export default function BestAvailable({ rows, taken, onSelect }) {
   const avail = rows.filter((r) => !taken.has(r.player_id));
   const overall = avail.slice(0, 5); // rows already sorted by score
@@ -22,7 +22,8 @@ export default function BestAvailable({ rows, taken, onSelect }) {
         ))}
       </div>
       <p className="font-mono text-[10px] tracking-wide text-mute">
-        {avail.length} of {rows.length} available · xVOR = expected league pts/wk over replacement
+        {avail.length} of {rows.length} available · xVOR = expected league pts/wk over replacement,
+        first 3 seasons
       </p>
     </div>
   );

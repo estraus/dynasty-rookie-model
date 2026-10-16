@@ -16,6 +16,7 @@ export default function Delta({ rows, taken, onSelect }) {
     );
   }
   const sorted = [...withKtc].sort((a, b) => b.delta_vs_ktc - a.delta_vs_ktc);
+  const unpriced = rows.filter((r) => r.delta_vs_ktc == null);
   return (
     <div className="space-y-1">
       <p className="font-mono text-[11px] text-mute px-2 pb-2 tracking-wide">
@@ -49,6 +50,29 @@ export default function Delta({ rows, taken, onSelect }) {
           </span>
         </button>
       ))}
+      {unpriced.length > 0 && (
+        <div className="pt-6">
+          <p className="font-mono text-[11px] text-mute px-2 pb-2 tracking-wide">
+            no market price · {unpriced.length} players KTC doesn't rank yet, so there's no delta.
+            Any with a real score are free in the market.
+          </p>
+          <div className="flex flex-wrap gap-x-4 gap-y-1 px-2">
+            {unpriced.map((r) => (
+              <button
+                key={r.player_id}
+                onClick={() => onSelect(r)}
+                className={`flex items-baseline gap-1.5 hover:text-ink ${taken.has(r.player_id) ? "opacity-40" : ""}`}
+              >
+                <span className={`font-display font-bold tabular-nums ${scoreColor(r.score_1_100)}`}>
+                  {r.score_1_100}
+                </span>
+                <span className="font-display tracking-wide text-dim">{r.name}</span>
+                <PosTag pos={r.pos} />
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
