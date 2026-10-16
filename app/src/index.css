@@ -1,0 +1,31 @@
+@import url("https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap");
+@import "tailwindcss";
+
+/* war-room palette: walnut board, paper ink, brass accent, magnet colors per position */
+@theme {
+  --color-board: #161209;
+  --color-card: #1e1910;
+  --color-raised: #272013;
+  --color-well: #100d06;
+  --color-line: rgba(234, 226, 208, 0.09);
+  --color-line-strong: rgba(234, 226, 208, 0.22);
+  --color-ink: #eae2d0;
+  --color-dim: #a99e85;
+  --color-mute: #6e6552;
+  --color-brass: #d3a94f;
+  --color-up: #93a86a;
+  --color-down: #c9704f;
+  --color-qb: #c07a54;
+  --color-rb: #8fa06a;
+  --color-wr: #7c94a8;
+  --color-te: #c2a05a;
+  --font-display: "Barlow Condensed", sans-serif;
+  --font-mono: "IBM Plex Mono", monospace;
+}
+
+:root { color-scheme: dark; }
+body { @apply bg-board text-ink antialiased text-sm; }
+
+::selection { @apply bg-brass/30; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { @apply bg-raised rounded; }

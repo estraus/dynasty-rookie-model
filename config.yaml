@@ -1,0 +1,72 @@
+# Dynasty rookie model config. Single source of truth for scoring + ranges.
+# League: superflex, half-PPR, 6pt passing TD.
+
+league:
+  passing_yards: 0.04      # 1 pt / 25 yds
+  passing_td: 6.0
+  interception: -2.0
+  rushing_yards: 0.1       # 1 pt / 10 yds
+  rushing_td: 6.0
+  reception: 0.5           # half-PPR
+  te_reception_bonus: 0.25 # Sleeper bonus_rec_te: TEs are effectively 0.75 PPR
+  receiving_yards: 0.1
+  receiving_td: 6.0
+  fumble_lost: -2.0
+  two_point: 2.0
+
+# Hit = positional PPG rank within a season, min games, inside first N NFL seasons.
+labels:
+  min_games: 8
+  window_seasons: 3        # first 3 NFL seasons
+  hit_rank:
+    QB: 12                 # top-12 QB
+    RB: 24
+    WR: 24
+    TE: 12
+
+seasons:
+  college_start: 2010      # cfbd college seasons
+  college_end: 2025
+  nfl_start: 2013          # nflverse draft/weekly
+  nfl_end: 2025
+  train_classes: [2013, 2023]   # inclusive draft-class range with full 3yr windows
+  score_class: 2026             # class we ultimately score
+
+positions: [QB, RB, WR, TE]
+
+power_conferences: [SEC, "Big Ten", "Big 12", ACC, Pac-12, "Pac-12"]
+
+paths:
+  raw: data/raw
+  interim: data/interim
+  processed: data/processed
+  overrides: overrides/id_matches.csv
+
+# Cross-position board layer. Positional value premiums are applied HERE, not
+# in the models (keeps P(hit) honest; value adjustment is a board concern).
+# Premiums are DERIVED from data (src.model.score._premiums): mean league-scoring
+# VOR of hit seasons per position, over the lineup replacement level below,
+# normalized so the non-QB mean is 1.0. Superflex enters through QB's
+# replacement rank: 12 teams x (1 QB + 1 SF) start ~24 QBs, not 12.
+board:
+  replacement_rank:             # lineup starters league-wide (12 teams):
+    QB: 24                      #   1 QB + 1 SF per team
+    RB: 30                      #   2 RB + ~half a flex
+    WR: 42                      #   3 WR + ~1.5 flex
+    TE: 12                      #   1 TE
+  tiers:                        # score_1_100 lower bounds -> tier label
+    - {min: 88, tier: 1}
+    - {min: 74, tier: 2}
+    - {min: 58, tier: 3}
+    - {min: 40, tier: 4}
+    - {min: 0,  tier: 5}
+
+# Sleeper league for the app's League view (src/ingest/sleeper.py).
+sleeper:
+  league_id: "YOUR_SLEEPER_LEAGUE_ID"
+  username: your_sleeper_username
+  # starter-weighted depth for positional strength: top-k player values summed.
+  # 1QB 2RB 3WR 1TE 2FLEX 1SF lineup -> effective starters per position.
+  starter_depth: {QB: 2, RB: 3, WR: 4, TE: 2}
+
+seed: 1729
